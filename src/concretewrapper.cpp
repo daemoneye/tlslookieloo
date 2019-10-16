@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
+#include <ostream>
+
+#include <unistd.h>
+#include <fcntl.h>
+
 #include <sys/select.h>
 #include <openssl/ssl.h>
-#include <ostream>
 
 #include "concretewrapper.h"
 
@@ -59,6 +63,47 @@ int ConcreteWrapper::getaddrinfo(const char *node, const char *service,
 int ConcreteWrapper::socket(int domain, int type, int protocol)
 {
     return ::socket(domain, type, protocol);
+}
+
+int ConcreteWrapper::setsockopt(int sockfd, int level, int optname,
+    const void *optval, socklen_t optlen)
+{
+    return ::setsockopt(sockfd, level, optname, optval, optlen);
+}
+
+int ConcreteWrapper::bind(int sockfd, const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    return ::bind(sockfd, addr, addrlen);
+}
+
+int ConcreteWrapper::listen(int sockfd, int backlog)
+{
+    return ::listen(sockfd, backlog);
+}
+
+int ConcreteWrapper::accept(int sockfd, struct sockaddr *addr,
+    socklen_t *addrlen)
+{
+    return ::accept(sockfd, addr, addrlen);
+}
+
+int ConcreteWrapper::fcntl(int sockfd, int cmd, int val)
+{
+    // NOLINTNEXTLINE
+    return ::fcntl(sockfd, cmd, val);
+}
+
+int ConcreteWrapper::getsockopt(int sockfd, int level, int optname,
+    void *optval, socklen_t *optlen)
+{
+    return ::getsockopt(sockfd, level, optname, optval, optlen);
+}
+
+int ConcreteWrapper::connect(int sockfd, const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    return ::connect(sockfd, addr, addrlen);
 }
 
 } // namespace

@@ -76,12 +76,7 @@ void Target::start()
 
     try
     {
-        if(tgtItem.timeout)
-        {
-            auto val = tgtItem.timeout.value();
-            LOG4CPLUS_DEBUG(logger, "Setting timeout to " << val); // NOLINT
-            timeout = val;
-        }
+        timeout = tgtItem.timeout;
 
         ClientSide clientListener(wrapper);
         clientListener.startListener(tgtItem.clientPort, 2);
@@ -107,6 +102,21 @@ void Target::start()
             handleClient(acceptRslt);
         }
     }
+    catch(const system_error &e)
+    {
+        if(e.code() == make_error_code(errc::interrupted))
+        {
+            // NOLINTNEXTLINE
+            LOG4CPLUS_INFO(logger,
+                "Interrupted while waiting for client-side to connect");
+        }
+        else
+        {
+            // NOLINTNEXTLINE
+            LOG4CPLUS_ERROR(logger,
+                "Error ecnountered handling target. Cause: " << e.what());
+        }
+    }
     catch(const runtime_error &e)
     {
         // NOLINTNEXTLINE
@@ -126,13 +136,12 @@ void Target::start()
 bool Target::messageRelay(SocketInfo &src, SocketInfo &dest, const MSGOWNER owner)
 {
     bool retVal = true;
-    size_t amtRead;
-    size_t bufSize = 1024;
+    size_t bufSize = 4096;
     unique_ptr<char[]> buf(new char[bufSize]);
     bool keepReading = true;
     while(keepReading)
     {
-        amtRead = 1024;
+        auto amtRead = bufSize;
         switch(src.readData(buf.get(), amtRead))
         {
         case SocketInfo::OP_STATUS::SUCCESS:
@@ -169,6 +178,7 @@ bool Target::messageRelay(SocketInfo &src, SocketInfo &dest, const MSGOWNER owne
             {
                 // NOLINTNEXTLINE
                 LOG4CPLUS_DEBUG(logger, "No more data to relay");
+                storeMessage(buf.get(), 0, owner);
                 keepReading = false;
             }
             break;
@@ -196,7 +206,18 @@ bool Target::messageRelay(SocketInfo &src, SocketInfo &dest, const MSGOWNER owne
 void Target::handleClient(ClientSide client)
 {
     LOG4CPLUS_INFO(logger, "Start monitoring"); // NOLINT
-    client.setTimeout(timeout);
+
+    ServerSide server;
+    if(timeout)
+    {
+        // NOLINTNEXTLINE
+        LOG4CPLUS_TRACE(logger, "Setting communication timeout to "
+            << timeout.value());
+        client.setTimeout(timeout.value());
+        server.setTimeout(timeout.value());
+    }
+    else
+        LOG4CPLUS_TRACE(logger, "No timeout set for target"); // NOLINT
 
     if(!client.sslHandshake())
     {
@@ -218,8 +239,6 @@ void Target::handleClient(ClientSide client)
     else
         LOG4CPLUS_TRACE(logger, "Not setting client auth cert data"); // NOLINT
 
-    ServerSide server;
-    server.setTimeout(timeout);
     if(!server.connect(tgtItem.serverPort, tgtItem.serverHost, clientCertInfo,
         tgtItem.serverInsecure, tgtItem.serverCAChainFile))
     {
@@ -325,15 +344,21 @@ vector<Target::READREADYSTATE> Target::waitForReadable(ClientSide &client, Serve
     auto maxSocket = max({ clientFd, serverFd });
     LOG4CPLUS_TRACE(logger, "Value of maxSocket: " << maxSocket); // NOLINT
 
-    timeval waitTime; // NOLINT
-    // NOLINTNEXTLINE
-    LOG4CPLUS_TRACE(logger, "Setting timeout to " << timeout << " seconds");
-    waitTime.tv_sec=timeout;
-    waitTime.tv_usec=0;
+    unique_ptr<struct timeval> waitTime;
+    if(timeout)
+    {
+        // NOLINTNEXTLINE
+        LOG4CPLUS_TRACE(logger, "Setting timeout to " << timeout.value() << " seconds");
+        waitTime = make_unique<struct timeval>();
+        waitTime->tv_sec=timeout.value();
+        waitTime->tv_usec=0;
+    }
+    else
+        LOG4CPLUS_TRACE(logger, "Not setting wait timeout"); // NOLINT
 
     LOG4CPLUS_TRACE(logger, "Wait for one side to be ready"); // NOLINT
     auto rslt = wrapper->select(maxSocket+1, &readFd, nullptr, nullptr,
-        &waitTime);
+        waitTime.get());
     LOG4CPLUS_TRACE(logger, "Value of rslt: " << rslt); // NOLINT
     if(rslt == 0)
         LOG4CPLUS_DEBUG(logger, "Read wait time expired"); // NOLINT
@@ -371,35 +396,57 @@ vector<Target::READREADYSTATE> Target::waitForReadable(ClientSide &client, Serve
 void Target::storeMessage(const char * data, const size_t &len,
     const MSGOWNER &owner)
 {
+    const string msgTail("\n===END===\n");
+
     if(data == nullptr)
         throw logic_error("data is nullptr");
 
-    struct std::tm tmObj; // NOLINT
-    time_t cTime;
+    ostringstream cleandata(string(), ios_base::ate);
+    if(lastMsgOwner != owner)
     {
-        lock_guard<mutex> lk(tmGuard);
-        cTime = time(nullptr);
-        memcpy(&tmObj, gmtime(&cTime), sizeof(struct tm));
-    }
+        if(lastMsgOwner)
+        {
+            LOG4CPLUS_TRACE(logger, "Close last message block"); // NOLINT
+            cleandata << msgTail;
+        }
 
-    // YYYY-mm-dd 00:00:00
-    const size_t tmBufSize = 20;
-    char tmBuf[tmBufSize];
-    strftime(&tmBuf[0], tmBufSize, "%F %T", &tmObj);
-    ostringstream cleandata("===", ios_base::ate);
-    cleandata << &tmBuf[0] << " BEGIN ";
-    switch(owner)
-    {
-    case MSGOWNER::CLIENT:
-        cleandata << "client-->server===";
-        break;
-    case MSGOWNER::SERVER:
-        cleandata << "server-->client===";
-        break;
-    default:
-        logic_error("Unexpected owner value");
+        LOG4CPLUS_TRACE(logger, "Add record header"); // NOLINT
+        struct std::tm tmObj; // NOLINT
+        time_t cTime;
+        {
+            lock_guard<mutex> lk(tmGuard);
+            cTime = time(nullptr);
+            memcpy(&tmObj, gmtime(&cTime), sizeof(struct tm));
+        }
+
+        // YYYY-mm-dd 00:00:00
+        const size_t tmBufSize = 20;
+        char tmBuf[tmBufSize];
+        strftime(&tmBuf[0], tmBufSize, "%F %T", &tmObj);
+
+        cleandata << "===" << &tmBuf[0] << " BEGIN ";
+        switch(owner)
+        {
+        case MSGOWNER::CLIENT:
+            cleandata << "client-->server===";
+            break;
+        case MSGOWNER::SERVER:
+            cleandata << "server-->client===";
+            break;
+        default:
+            logic_error("Unexpected owner value");
+        }
+        cleandata << "\n";
+        lastMsgOwner = owner;
     }
-    cleandata << "\n";
+    else if(len == 0)
+    {
+        LOG4CPLUS_TRACE(logger, "Placing end marker"); // NOLINT
+        cleandata << msgTail;
+        lastMsgOwner.reset();
+    }
+    else
+        LOG4CPLUS_TRACE(logger, "Data continuation"); // NOLINT
 
     for(size_t i=0; i<len; i++)
     {
@@ -410,7 +457,6 @@ void Target::storeMessage(const char * data, const size_t &len,
             cleandata << "<" << std::setw(2) << std::setfill('0') << std::hex
                 << static_cast<unsigned int>(c) << ">";
     }
-    cleandata << "\n===END===\n";
 
     LOG4CPLUS_TRACE(logger, "Value of cleandata: " << cleandata.str()); // NOLINT
     wrapper->ostream_write(recordFileStream, cleandata.str().c_str(),

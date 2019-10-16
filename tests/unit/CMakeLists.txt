@@ -14,6 +14,7 @@
 
 link_directories(${CMAKE_BINARY_DIR}/googletest/lib)
 add_executable(unittests main.cpp
+    mockwrapper.cpp
     ${CMAKE_SOURCE_DIR}/src/concretewrapper.cpp
     ${CMAKE_SOURCE_DIR}/src/init.cpp init.cpp
     ${CMAKE_SOURCE_DIR}/src/socketinfo.cpp socketinfo.cpp
@@ -33,9 +34,7 @@ target_link_libraries(unittests gtest gmock pthread
 )
 
 add_test(parseTargetsFile unittests -t${CMAKE_SOURCE_DIR}/tests/unit/targets_files --gtest_filter=parseTargetsFile.*)
-add_test(SocketInfoTest unittests --gtest_filter=SocketInfoTest.*)
-add_test(ClientSideTest unittests --gtest_filter=ClientSideTest.* -c${CMAKE_SOURCE_DIR}/tests/unit/test_cert)
-add_test(ServerSideTest unittests --gtest_filter=ServerSideTest.*)
-
-#TODO: Fix with issue #2
-add_test(Target unittests --gtest_filter=TargetTest.*:-TargetTest.storeMessage* -c${CMAKE_SOURCE_DIR}/tests/unit/test_cert)
+add_test(SocketInfoTest unittests --gtest_filter=SocketInfoTest.* --gmock_verbose=error)
+add_test(ClientSideTest unittests --gtest_filter=ClientSideTest.* -c${CMAKE_SOURCE_DIR}/tests/unit/test_cert --gmock_verbose=error)
+add_test(ServerSideTest unittests --gtest_filter=ServerSideTest.* --gmock_verbose=error)
+add_test(Target unittests --gtest_filter=TargetTest.* -c${CMAKE_SOURCE_DIR}/tests/unit/test_cert)

@@ -50,6 +50,23 @@ public:
         const struct addrinfo* hints, struct addrinfo **res) override;
 
     virtual int socket(int domain, int type, int protocol) override;
+
+    virtual int setsockopt(int sockfd, int level, int optname,
+        const void *optval, socklen_t optlen) override;
+
+    virtual int bind(int sockfd, const struct sockaddr *addr,
+        socklen_t addrlen) override;
+
+    virtual int listen(int sockfd, int backlog) override;
+
+    virtual int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) override;
+
+    virtual int fcntl(int fd, int cmd, int val) override;
+
+    virtual int getsockopt(int sockfd, int level, int optname, void *optval,
+        socklen_t *optlen) override;
+
+    virtual int connect(int, const struct sockaddr *, socklen_t) override;
 };
 
 } // namespace

@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-#include "gtest/gtest.h"
+#include "gmock/gmock.h"
 
 #include <cerrno>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
+#include <fcntl.h>
 
 #include "log4cplus/ndc.h"
 
@@ -28,6 +29,7 @@
 
 using namespace testing;
 using namespace std;
+using ::testing::InSequence;
 
 namespace tlslookieloo
 {
@@ -37,6 +39,13 @@ MATCHER_P(IsFdSet, fd, "fd is set") // NOLINT
     return arg != nullptr && FD_ISSET(fd, arg); // NOLINT
 }
 
+MATCHER_P(IsVoidPtrIntEq, val, "void pointer points to int with expected value") // NOLINT
+{
+    return arg != nullptr &&
+        *(reinterpret_cast<const int *>(arg)) == val; // NOLINT
+}
+
+// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class ClientSideTest : public ::testing::Test
 {
 protected:
@@ -49,14 +58,16 @@ protected:
         client(mock)
     {}
 
-    void SetUp() override
+    virtual ~ClientSideTest(){};
+
+    virtual void SetUp() override
     {
         client.setSocket(fd);
         client.newSSLCtx();
         client.newSSLObj();
     }
 
-    unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> getExpectedPubKey()
+    virtual unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> getExpectedPubKey()
     {
         const char expectPubKey[] = R"foo(-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwDoRldXkyzxmDYgi307p
@@ -84,7 +95,121 @@ pyrpYfQs5MLgJWPTh84f4P/bwaU70ABd/pXVsUlqWYI7FgzyJRuRXwoksOWVOFmY
 
         return evpKey;
     }
+
 };
+
+TEST_F(ClientSideTest, startListenerResolveFail) // NOLINT
+{
+    ON_CALL((*mock), getaddrinfo(_, _, _, _))
+        .WillByDefault(Return(1));
+
+   EXPECT_THROW(client.startListener(1024, 1), logic_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, startListenerSockOptError) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsocket(mock);
+
+    EXPECT_CALL((*mock), setsockopt(4, SOL_SOCKET, SO_REUSEADDR, IsVoidPtrIntEq(1), sizeof(int)))
+        .WillOnce(Invoke(
+            [](int, int, int, const void *, socklen_t)->int{
+                errno = ENOTSOCK;
+                return -1;
+            }
+        ));
+    EXPECT_THROW(client.startListener(1024, 1), system_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, startListenerBindError) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsetsockopt(mock);
+    setDefaultsocket(mock);
+
+    EXPECT_CALL((*mock), bind(4, _, _))
+        .WillOnce(Invoke(
+            [](int, const struct sockaddr *, socklen_t)->int{
+                errno = EADDRINUSE;
+                return -1;
+            }
+        ));
+
+    EXPECT_THROW(client.startListener(1024, 1), system_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, startListenerListenError) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsocket(mock);
+    setDefaultsocket(mock);
+    setDefaultbind(mock);
+
+    EXPECT_CALL((*mock), listen(4, 1))
+        .WillOnce(Invoke(
+            [](int, int)->int{
+                errno = ENOTSOCK;
+                return -1;
+            }
+        ));
+
+    EXPECT_THROW(client.startListener(1024, 1), system_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, startListenerGood) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsocket(mock);
+    setDefaultsocket(mock);
+    setDefaultbind(mock);
+
+    EXPECT_NO_THROW(client.startListener(1024, 1)); // NOLINT
+}
+
+TEST_F(ClientSideTest, acceptClientBadFd) // NOLINT
+{
+    setDefaultselect(mock);
+    EXPECT_CALL((*mock), accept(4, _, _))
+        .WillOnce(Invoke(
+            [](int, struct sockaddr *, socklen_t *)->int{
+                errno = ENOMEM;
+                return -1;
+            }
+        ));
+
+    EXPECT_THROW(client.acceptClient(), system_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, acceptClientNonBlockFail) // NOLINT
+{
+    setDefaultselect(mock);
+    setDefaultaccept(mock);
+
+    {
+        InSequence seq;
+        EXPECT_CALL((*mock), fcntl(5, F_GETFL, 0))
+            .WillOnce(Return(0));
+
+        EXPECT_CALL((*mock), fcntl(5, F_SETFL, O_NONBLOCK))
+            .WillOnce(Return(-1));
+    }
+
+    EXPECT_THROW(client.acceptClient(), system_error); // NOLINT
+}
+
+TEST_F(ClientSideTest, acceptClientGood) // NOLINT
+{
+    setDefaultselect(mock);
+    setDefaultaccept(mock);
+    setDefaultfcntl(mock);
+
+    // NOLINTNEXTLINE
+    EXPECT_NO_THROW({
+        auto rslt = client.acceptClient();
+        auto socket = rslt.getSocket();
+        EXPECT_EQ(socket, 5);
+    });
+}
 
 TEST_F(ClientSideTest, waitSocketReadableGood) // NOLINT
 {

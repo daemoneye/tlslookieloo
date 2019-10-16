@@ -78,6 +78,43 @@ public:
      * Wrap socket()
      */
     virtual int socket(int, int, int) = 0;
+
+    /**
+     * Wrap setsockopt()
+     */
+    virtual int setsockopt(int, int, int, const void *, socklen_t) = 0;
+
+    /**
+     * Wrap bind()
+     */
+    virtual int bind(int, const struct sockaddr *, socklen_t) = 0;
+
+    /**
+     * Wrap listen()
+     */
+    virtual int listen(int, int) = 0;
+
+    /**
+     * Wrap accept()
+     */
+    virtual int accept(int, struct sockaddr *, socklen_t *) = 0;
+
+    /**
+     * Wrap fcntl()
+     *
+     * The POSIX fcntl's 3rd parameter is actually a variadic.
+     */
+    virtual int fcntl(int, int, int) = 0;
+
+    /**
+     * Wrap getsockopt()
+     */
+    virtual int getsockopt(int, int, int, void *, socklen_t *) = 0;
+
+    /**
+     * Wrap connect()
+     */
+    virtual int connect(int, const struct sockaddr *, socklen_t) = 0;
 };
 
 } // namespace

@@ -21,6 +21,7 @@
 #include <fstream>
 #include <vector>
 #include <mutex>
+#include <optional>
 
 #include "log4cplus/logger.h"
 #include "log4cplus/loggingmacros.h"
@@ -99,7 +100,7 @@ private:
     log4cplus::Logger logger = log4cplus::Logger::getInstance("Target");
     TargetItem tgtItem;
     std::shared_ptr<Wrapper> wrapper;
-    unsigned int timeout = 5;
+    std::optional<unsigned int> timeout;
     static std::atomic_bool keepRunning;
     std::ofstream recordFileStream;
     std::mutex tmGuard;
@@ -135,6 +136,8 @@ private:
      */
     std::vector<READREADYSTATE> waitForReadable(ClientSide &client, ServerSide &server);
 
+    std::optional<MSGOWNER> lastMsgOwner;
+
     /**
      * Log the data received with indicator of origin
      *
@@ -155,6 +158,9 @@ private:
     FRIEND_TEST(TargetTest, storeMessageServer);
     FRIEND_TEST(TargetTest, storeMessageBinary);
     FRIEND_TEST(TargetTest, storeMessageNullPtr);
+    FRIEND_TEST(TargetTest, storeSingleChunkMessage);
+    FRIEND_TEST(TargetTest, storeChunkedMessage);
+    FRIEND_TEST(TargetTest, storeAlternatingMessage);
 
     FRIEND_TEST(TargetTest, messageRelayGood);
     FRIEND_TEST(TargetTest, messageRelayNoData);

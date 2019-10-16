@@ -19,11 +19,11 @@
 #include <string>
 #include <optional>
 #include <tuple>
+#include <memory>
 
 #include <sys/socket.h>
 
 #include <log4cplus/loggingmacros.h>
-
 
 #include "serverside.h"
 
@@ -86,7 +86,7 @@ bool ServerSide::waitForConnect()
 
         int val;
         socklen_t len = sizeof(val);
-        auto err = getsockopt(getSocket(), SOL_SOCKET, SO_ERROR, &val, &len);
+        auto err = wrapper->getsockopt(getSocket(), SOL_SOCKET, SO_ERROR, &val, &len);
         const string ip = getSocketIP();
         if(err != 0)
             throwSystemError(err, "getsockopt error");
@@ -126,7 +126,7 @@ const bool ServerSide::sockConnect(const unsigned int &port, const string &host)
                 ip = getSocketIP();
                 auto addrInfo = getAddrInfo();
                 LOG4CPLUS_DEBUG(logger, "Attempt connecting to " << ip); // NOLINT
-                if(::connect(getSocket(),
+                if(wrapper->connect(getSocket(),
                     reinterpret_cast<const struct sockaddr *>(addrInfo->ai_addr), // NOLINT
                     addrInfo->ai_addrlen) != 0
                 )
@@ -190,11 +190,12 @@ void ServerSide::initializeSSLContext(const optional<const string> &serverCAChai
     if(serverCAChainFile)
     {
         auto CAChainFile = serverCAChainFile.value();
-        LOG4CPLUS_INFO(logger, "Using CA cert chain in " << CAChainFile);
+        LOG4CPLUS_INFO(logger, "Using CA cert chain in " << CAChainFile); // NOLINT
         if(SSL_CTX_use_certificate_chain_file(ptr, CAChainFile.c_str()) == 0)
         {
-            logSSLErrorStack();
-            throw runtime_error("Failed to load CA certificate chain file");
+            const string msg = "Failed to load CA certificate chain file.";
+            logSSLError(msg);
+            throw runtime_error(msg);
         }
         else
             LOG4CPLUS_TRACE(logger, "CA cert chain file loaded"); // NOLINT
@@ -205,8 +206,9 @@ void ServerSide::initializeSSLContext(const optional<const string> &serverCAChai
     // Load certificates from store
     if(SSL_CTX_set_default_verify_paths(ptr) == 0)
     {
-        logSSLErrorStack();
-        throw runtime_error("Failed to set CA verify paths");
+        const string msg = "Failed to set CA verify paths.";
+        logSSLError(msg);
+        throw runtime_error(msg);
     }
     else
         LOG4CPLUS_TRACE(logger, "CA verify paths set"); // NOLINT
@@ -221,8 +223,8 @@ const bool ServerSide::sslHandshake(const std::string &host,
     ERR_clear_error();
     if(SSL_set_fd(ptr, getSocket()) == 0)
     {
-        const string msg = sslErrMsg("Failed to set FD to SSL. Cause: ");
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = "Failed to set FD to SSL.";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -230,8 +232,8 @@ const bool ServerSide::sslHandshake(const std::string &host,
 
     if(SSL_set1_host(ptr, host.c_str()) != 1)
     {
-        const string msg = sslErrMsg("Failed to set expected host. Cause: ");
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = "Failed to set expected host.";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -257,11 +259,11 @@ const bool ServerSide::sslHandshake(const std::string &host,
         if(rslt == -1)
         {
             LOG4CPLUS_TRACE(logger, "SSL_connect reporting error"); // NOLINT
-            shouldRetry = handleRetry(rslt);
+            shouldRetry = (handleRetry(rslt) == SocketInfo::OP_STATUS::SUCCESS);
         }
         else if(rslt == 0)
         {
-            const string msg = sslErrMsg("Remote closed SSL handshake. Cause: ");
+            const string msg = "Remote closed SSL handshake.";
             LOG4CPLUS_WARN(logger, msg); // NOLINT
             retVal = shouldRetry = false;
         }
@@ -285,7 +287,7 @@ const bool ServerSide::sslHandshake(const std::string &host,
             LOG4CPLUS_TRACE(logger, "Value of peerVal: " << peerVal); // NOLINT
             if(peerVal != X509_V_OK)
             {
-                LOG4CPLUS_WARN(logger, "Failed to verify peer. Cause: " << // NOLINT
+                LOG4CPLUS_WARN(logger, "Failed to verify server identity. Cause: " << // NOLINT
                     X509_verify_cert_error_string(peerVal)
                 );
                 retVal = (allowInsecure == true);
@@ -301,7 +303,7 @@ const bool ServerSide::sslHandshake(const std::string &host,
     else
         LOG4CPLUS_DEBUG(logger, "Handshake failed"); // NOLINT
 
-    LOG4CPLUS_TRACE(logger, "Handshake result to return: " << retVal);
+    LOG4CPLUS_TRACE(logger, "Handshake result to return: " << retVal); // NOLINT
     return retVal;
 }
 
@@ -313,11 +315,20 @@ const bool ServerSide::socketReady()
     FD_ZERO(&writeFd);
     FD_SET(getSocket(), &writeFd); // NOLINT
 
-    timeval waitTime; // NOLINT
-    waitTime.tv_sec = getTimeout();
-    waitTime.tv_usec = 0;
+    unique_ptr<timeval>waitTime(nullptr);
+    auto timeout = getTimeout();
+    if(timeout)
+    {
+        // NOLINTNEXTLINE
+        LOG4CPLUS_DEBUG(logger, "Setting timeout to " << timeout.value());
+        waitTime = make_unique<timeval>();
+        waitTime->tv_sec = timeout.value();
+        waitTime->tv_usec = 0;
+    }
+    else
+        LOG4CPLUS_DEBUG(logger, "No timeout set"); // NOLINT
 
-    auto rslt = wrapper->select(getSocket() + 1, nullptr, &writeFd, nullptr, &waitTime);
+    auto rslt = wrapper->select(getSocket() + 1, nullptr, &writeFd, nullptr, waitTime.get());
     if(rslt > 0)
     {
         if(!FD_ISSET(getSocket(), &writeFd)) // NOLINT
@@ -347,11 +358,9 @@ void ServerSide::loadClientCertificate(const string &clientCertFile,
     if(SSL_use_certificate_file(ptr, clientCertFile.c_str(),
         SSL_FILETYPE_PEM) == 0)
     {
-        const string msg = sslErrMsg(
-            string("Failed to load certificate file ") + clientCertFile +
-            ". Cause: "
-        );
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = string("Failed to load certificate file ") +
+            clientCertFile + ".";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -361,11 +370,9 @@ void ServerSide::loadClientCertificate(const string &clientCertFile,
     if(SSL_use_PrivateKey_file(ptr, clientPrivKeyFile.c_str(),
         SSL_FILETYPE_PEM) == 0)
     {
-        const string msg = sslErrMsg(
-            string("Failed to load private key ") + clientPrivKeyFile +
-            ". Cause: "
-        );
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg =  string("Failed to load private key ") +
+            clientPrivKeyFile + ".";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else

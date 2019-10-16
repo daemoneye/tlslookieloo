@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-#include "gtest/gtest.h"
+#include "gmock/gmock.h"
 
 #include <cerrno>
+#include <netdb.h>
 
 #include "log4cplus/ndc.h"
 
@@ -35,6 +36,7 @@ MATCHER_P(IsFdSet, fd, "fd is set") // NOLINT
     return arg != nullptr && FD_ISSET(fd, arg); // NOLINT
 }
 
+// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class ServerSideTest : public ::testing::Test
 {
 protected:
@@ -47,19 +49,206 @@ protected:
         client(mock)
     {}
 
-    void SetUp() override
+    virtual void SetUp() override
     {
         client.setSocket(fd);
         client.newSSLCtx();
         client.newSSLObj();
+        client.socketIP = "unit_test";
     }
+
+    virtual void clearNextServ()
+    {
+        client.nextServ = nullptr;
+    }
+
+    virtual ~ServerSideTest(){}
 };
+
+TEST_F(ServerSideTest, waitForConnectgetsockoptError) // NOLINT
+{
+    setDefaultselect(mock);
+
+    EXPECT_CALL((*mock),
+        getsockopt(4, SOL_SOCKET, SO_ERROR, NotNull(), Pointee(sizeof(int))))
+        .WillOnce(Return(EACCES));
+
+    EXPECT_THROW(client.waitForConnect(), system_error); // NOLINT
+}
+
+TEST_F(ServerSideTest, waitForConnectConnFail) // NOLINT
+{
+    setDefaultselect(mock);
+
+    EXPECT_CALL((*mock),
+        getsockopt(4, SOL_SOCKET, SO_ERROR, NotNull(), Pointee(sizeof(int))))
+        .WillOnce(WithArg<3>(
+            [](void *opt)->int
+            {
+                int *val = reinterpret_cast<int *>(opt); // NOLINT
+                *val = ETIMEDOUT;
+                return 0;
+            }
+        ));
+
+    EXPECT_FALSE(client.waitForConnect());
+}
+
+TEST_F(ServerSideTest, waitForConnectTimeout) // NOLINT
+{
+    EXPECT_CALL((*mock), select(_, _, _, _, _))
+        .WillOnce(Return(0));
+
+    // NOLINTNEXTLINE
+    EXPECT_NO_THROW(
+        EXPECT_FALSE(client.waitForConnect())
+    );
+}
+
+TEST_F(ServerSideTest, waitForConnectGood) // NOLINT
+{
+    setDefaultselect(mock);
+    EXPECT_CALL((*mock),
+        getsockopt(4, SOL_SOCKET, SO_ERROR, NotNull(), Pointee(sizeof(int))))
+        .WillOnce(WithArg<3>(
+            [](void *opt)->int
+            {
+                int *val = reinterpret_cast<int *>(opt); // NOLINT
+                *val = 0;
+                return 0;
+            }
+        ));
+
+    // NOLINTNEXTLINE
+    EXPECT_NO_THROW(
+        EXPECT_TRUE(client.waitForConnect())
+    );
+}
+
+TEST_F(ServerSideTest, sockConnectResolveFail) // NOLINT
+{
+    EXPECT_CALL((*mock), getaddrinfo(_, _, _, _))
+        .WillOnce(Return(EAI_AGAIN));
+
+    EXPECT_FALSE(client.sockConnect(9999, ""));
+}
+
+TEST_F(ServerSideTest, sockConnectNoMoreIPs) // NOLINT
+{
+    EXPECT_CALL((*mock), getaddrinfo(_, _, _, _))
+        .WillOnce(WithArgs<2, 3>(
+            [](const struct addrinfo *hints, struct addrinfo **res)->int
+            {
+                int retVal = ::getaddrinfo(nullptr, "9900", hints, res);
+                if(retVal == 0 && res)
+                    (*res)->ai_next = nullptr;
+                return retVal;
+            }
+        ));
+
+    EXPECT_CALL((*mock), connect(_, _, _))
+        .WillOnce(Return(-1));
+
+    EXPECT_NO_THROW(EXPECT_FALSE(client.sockConnect(9999, ""))); // NOLINT
+}
+
+TEST_F(ServerSideTest, sockConnectFirstIPReject) // NOLINT
+{
+    setDefaultsocket(mock);
+
+    {
+        InSequence seq;
+        EXPECT_CALL((*mock), getaddrinfo(_, _, _, _))
+            .WillOnce(WithArgs<2, 3>(
+                [](const struct addrinfo *hints, struct addrinfo **res)->int
+                {
+                    struct addrinfo *tmp;
+                    int retVal = ::getaddrinfo(nullptr, "9900", hints, &tmp);
+                    if(!retVal && tmp)
+                    {
+                        *res = new struct addrinfo; // NOLINT
+                        memcpy(
+                            reinterpret_cast<void*>(*res), // NOLINT
+                            reinterpret_cast<void*>(tmp), // NOLINT
+                            sizeof(struct addrinfo)
+                        );
+                        (*res)->ai_next = tmp;
+                    }
+
+                    return retVal;
+                }
+        ));
+
+        EXPECT_CALL((*mock), connect(_, _, _))
+            .WillOnce(Return(-1));
+
+        EXPECT_CALL((*mock), connect(_, _, _))
+            .WillOnce(Return(0));
+    }
+
+    EXPECT_NO_THROW(EXPECT_TRUE(client.sockConnect(9999, ""))); // NOLINT
+}
+
+TEST_F(ServerSideTest, sockConnectTimeout) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsocket(mock);
+
+    EXPECT_CALL((*mock), connect(4, _, _))
+        .WillRepeatedly(Invoke(
+            [](int, const struct sockaddr *, socklen_t)->int
+            {
+                errno = EINPROGRESS;
+                return -1;
+            }
+        ));
+
+    EXPECT_CALL((*mock), select(5, _, IsFdSet(4), _, _))
+        .WillRepeatedly(Return(0));
+
+    EXPECT_NO_THROW(EXPECT_FALSE(client.sockConnect(9900, ""))); // NOLINT
+}
+
+TEST_F(ServerSideTest, sockConnectDelay) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    setDefaultsocket(mock);
+
+    EXPECT_CALL((*mock), connect(4, _, _))
+        .WillRepeatedly(Invoke(
+            [](int, const struct sockaddr *, socklen_t)->int
+            {
+                errno = EINPROGRESS;
+                return -1;
+            }
+        ));
+
+    EXPECT_CALL((*mock), select(5, _, IsFdSet(4), _, _))
+        .WillRepeatedly(Return(1));
+
+    EXPECT_NO_THROW(EXPECT_FALSE(client.sockConnect(9900, ""))); // NOLINT
+}
+
+TEST_F(ServerSideTest, sockConnectFirstGood) // NOLINT
+{
+    setDefaultgetaddrinfo(mock);
+    EXPECT_CALL((*mock), socket(_, _, _))
+        .WillOnce(Return(4));
+
+    EXPECT_CALL((*mock), connect(4, _, _))
+        .WillOnce(Return(0));
+
+    EXPECT_CALL((*mock), select(_, _, _, _, _))
+        .Times(0);
+
+    EXPECT_NO_THROW(EXPECT_TRUE(client.sockConnect(9900, ""))); // NOLINT
+}
 
 TEST_F(ServerSideTest, socketReadyGood) // NOLINT
 {
     EXPECT_CALL(
         (*mock),
-        select(5, IsNull(), IsFdSet(fd), IsNull(), NotNull())
+        select(5, IsNull(), IsFdSet(fd), IsNull(), IsNull())
     ).WillOnce(Return(1));
 
     EXPECT_NO_THROW(EXPECT_TRUE(client.socketReady())); // NOLINT
@@ -69,7 +258,7 @@ TEST_F(ServerSideTest, socketReadyBadFd) // NOLINT
 {
     EXPECT_CALL(
         (*mock),
-        select(5, IsNull(), IsFdSet(fd), IsNull(), NotNull())
+        select(5, IsNull(), IsFdSet(fd), IsNull(), IsNull())
     ).WillOnce(DoAll(WithArg<2>(Invoke(
         [](fd_set *set){
             FD_ZERO(set);
@@ -84,7 +273,7 @@ TEST_F(ServerSideTest, socketReadyTimeout) // NOLINT
 {
     EXPECT_CALL(
         (*mock),
-        select(5, IsNull(), IsFdSet(fd), IsNull(), NotNull())
+        select(5, IsNull(), IsFdSet(fd), IsNull(), IsNull())
     ).WillOnce(Return(0));
 
     EXPECT_NO_THROW(EXPECT_FALSE(client.socketReady())); // NOLINT

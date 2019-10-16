@@ -41,7 +41,12 @@ protected:
         s(mock)
     {}
 
-    void SetUp() override
+    SocketInfoTest(const SocketInfoTest &) = delete;
+    SocketInfoTest(SocketInfoTest &&) = delete;
+
+    virtual ~SocketInfoTest(){}
+
+    virtual void SetUp() override
     {
         s.setSocket(fd);
         s.newSSLCtx();
@@ -70,6 +75,9 @@ TEST_F(SocketInfoTest, resolveHostPortInstanceInitialized) // NOLINT
     s.servInfo = shared_ptr<struct addrinfo>(
         new struct addrinfo,
         &freeaddrinfo);
+    s.servInfo->ai_canonname = nullptr;
+    s.servInfo->ai_addr = nullptr;
+    s.servInfo->ai_next = nullptr;
     EXPECT_THROW(s.resolveHostPort(9000, ""), logic_error); // NOLINT
 }
 
@@ -149,10 +157,10 @@ TEST_F(SocketInfoTest, handleRetryReady) // NOLINT
         EXPECT_CALL(
             (*mock),
             select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)),
-                NotNull()))
+                IsNull()))
             .WillOnce(Return(1));
 
-        EXPECT_EQ(SocketInfo::OP_STATUS::SUCCESS, s.handleRetry(-1, true));
+        EXPECT_EQ(SocketInfo::OP_STATUS::SUCCESS, s.handleRetry(-1));
     }
 
     {
@@ -162,10 +170,10 @@ TEST_F(SocketInfoTest, handleRetryReady) // NOLINT
         EXPECT_CALL(
             (*mock),
             select(Ge(fd), Not(IsFdSet(fd)), IsFdSet(fd), Not(IsFdSet(fd)),
-                NotNull()))
+                IsNull()))
             .WillOnce(Return(1));
 
-        EXPECT_EQ(SocketInfo::OP_STATUS::SUCCESS, s.handleRetry(-1, true));
+        EXPECT_EQ(SocketInfo::OP_STATUS::SUCCESS, s.handleRetry(-1));
     }
 }
 
@@ -181,6 +189,7 @@ TEST_F(SocketInfoTest, handleRetryTimeout) // NOLINT
             NotNull()))
         .WillOnce(Return(0));
 
+    s.timeout = 10;
     EXPECT_EQ(SocketInfo::OP_STATUS::TIMEOUT, s.handleRetry(-1));
 }
 
@@ -212,7 +221,7 @@ TEST_F(SocketInfoTest, handleRetryInterrupted) // NOLINT
         EXPECT_CALL(
             (*mock),
             select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)),
-                NotNull()))
+                IsNull()))
             .WillOnce(Return(-1));
 
         EXPECT_EQ(SocketInfo::OP_STATUS::INTERRUPTED, s.handleRetry(-1));
@@ -226,7 +235,7 @@ TEST_F(SocketInfoTest, handleRetryInterrupted) // NOLINT
         EXPECT_CALL(
             (*mock),
             select(Ge(fd), Not(IsFdSet(fd)), IsFdSet(fd), Not(IsFdSet(fd)),
-                NotNull()))
+                IsNull()))
             .WillOnce(Return(-1));
 
         EXPECT_EQ(SocketInfo::OP_STATUS::INTERRUPTED, s.handleRetry(-1));
@@ -242,25 +251,11 @@ TEST_F(SocketInfoTest, handleRetryError) // NOLINT
     EXPECT_CALL(
         (*mock),
         select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)),
-            NotNull()))
+            IsNull()))
         .WillOnce(Return(-1));
 
     EXPECT_THROW(s.handleRetry(-1), system_error); // NOLINT
     errno = 0;
-}
-
-TEST_F(SocketInfoTest, handleRetryNoTimeout) // NOLINT
-{
-    EXPECT_CALL((*mock), SSL_get_error(_, -1))
-        .WillOnce(Return(SSL_ERROR_WANT_READ));
-
-    EXPECT_CALL(
-        (*mock),
-        select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)),
-            IsNull()))
-        .WillOnce(Return(1));
-
-    EXPECT_EQ(SocketInfo::OP_STATUS::SUCCESS, s.handleRetry(-1, false));
 }
 
 TEST_F(SocketInfoTest, handleRetryRemoteDisconnect) // NOLINT
@@ -356,6 +351,7 @@ TEST_F(SocketInfoTest, readDataTimeout) // NOLINT
         select(Ge(fd), Not(IsFdSet(fd)), IsFdSet(fd), Not(IsFdSet(fd)), NotNull())
     ).WillOnce(Return(0));
 
+    s.setTimeout(10);
     size_t dataSize = 1;
     unique_ptr<char[]>buf(new char[dataSize]);
     auto rslt = s.readData(&buf[0], dataSize);
@@ -400,7 +396,7 @@ TEST_F(SocketInfoTest, writeDataShort) // NOLINT
 
     EXPECT_CALL(
         (*mock),
-        select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)), NotNull())
+        select(Ge(fd), IsFdSet(fd), Not(IsFdSet(fd)), Not(IsFdSet(fd)), IsNull())
     ).WillOnce(Return(1));
 
     EXPECT_CALL((*mock), SSL_write(NotNull(), IsVoidEqStr("abcdefg", 7), 7))

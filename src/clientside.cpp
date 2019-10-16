@@ -45,13 +45,13 @@ void ClientSide::startListener(const unsigned int &port,
             auto sockFd = getSocket();
 
             const int yes = 1;
-            if(setsockopt(sockFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes))
+            if(wrapper->setsockopt(sockFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes))
                 == -1)
                 throwSystemError(errno, "Error setting socket options");
             
             LOG4CPLUS_TRACE(logger, "Attempt to listen to port " << port); // NOLINT
             auto addr = getAddrInfo();
-            if(bind(
+            if(wrapper->bind(
                 sockFd, reinterpret_cast<const struct sockaddr *>(addr->ai_addr), // NOLINT
                 addr->ai_addrlen
                 ) == -1
@@ -60,7 +60,7 @@ void ClientSide::startListener(const unsigned int &port,
             
             LOG4CPLUS_TRACE(logger, "Bound to port " << port); // NOLINT
 
-            if(listen(sockFd, backlog) == -1)
+            if(wrapper->listen(sockFd, backlog) == -1)
                 throwSystemError(errno, "Failed to listen");
         }
         else
@@ -89,7 +89,7 @@ ClientSide ClientSide::acceptClient()
 
     // We're waiting forever, so no need to check timeout
     waitSocketReadable();
-    int fd = accept(getSocket(), reinterpret_cast<struct sockaddr *>(&addr), // NOLINT
+    int fd = wrapper->accept(getSocket(), reinterpret_cast<struct sockaddr *>(&addr), // NOLINT
         &addrLen);
     if(fd < 0)
     {
@@ -99,7 +99,8 @@ ClientSide ClientSide::acceptClient()
 
     LOG4CPLUS_DEBUG(logger, "Received connection. New FD: " << fd); // NOLINT
 
-    if(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) == -1) // NOLINT
+    if(wrapper->fcntl(fd, F_SETFL, wrapper->fcntl(fd, F_GETFL, 0) | O_NONBLOCK) // NOLINT
+        == -1)
     {
         int err = errno;
         throwSystemError(err, "Failed to set client FD non-blocking");
@@ -110,7 +111,7 @@ ClientSide ClientSide::acceptClient()
     ClientSide c(*this);
     c.setSocket(fd);
     // NOLINTNEXTLINE
-    c.saveSocketIP(reinterpret_cast<struct sockaddr_storage *>(&addr));
+    c.saveSocketIP(&addr);
 
     return c;
 }
@@ -126,11 +127,9 @@ void ClientSide::initializeSSLContext(const string &certFile, const string &priv
     if(SSL_CTX_use_certificate_file(ptr, certFile.c_str(),
         SSL_FILETYPE_PEM) == 0)
     {
-        const string msg = sslErrMsg(
-            string("Failed to load certificate file ") + certFile +
-            ". Cause: "
-        );
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = string("Failed to load certificate file ") +
+            certFile + ".";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -139,11 +138,9 @@ void ClientSide::initializeSSLContext(const string &certFile, const string &priv
     if(SSL_CTX_use_PrivateKey_file(ptr, privKeyFile.c_str(),
         SSL_FILETYPE_PEM) == 0)
     {
-        const string msg = sslErrMsg(
-            string("Failed to load private key ") + privKeyFile +
-            ". Cause: "
-        );
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = string("Failed to load private key ") +
+            privKeyFile + ".";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -161,8 +158,8 @@ const bool ClientSide::sslHandshake()
 
     if(SSL_set_fd(ptr, getSocket()) == 0)
     {
-        const string msg = sslErrMsg("Failed to set FD to SSL. Cause: ");
-        LOG4CPLUS_ERROR(logger, msg); // NOLINT
+        const string msg = "Failed to set FD to SSL.";
+        logSSLError(msg);
         throw runtime_error(msg);
     }
     else
@@ -245,8 +242,9 @@ void ClientSide::loadRefClientCertPubkey(const string &certFile,
         X509_get_pubkey(pubCert.get()), &EVP_PKEY_free);
     if(!refClientPubKey)
     {
-        throw runtime_error(
-            sslErrMsg("Failed to extract expected client public key"));
+        const string msg = "Failed to extract expected client public key.";
+        logSSLError(msg);
+        throw runtime_error(msg);
     }
 
     LOG4CPLUS_TRACE(logger, "Set client cert verification callback"); // NOLINT
@@ -256,8 +254,9 @@ void ClientSide::loadRefClientCertPubkey(const string &certFile,
     exDataIndex = SSL_CTX_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
     if(exDataIndex == -1)
     {
-        logSSLErrorStack();
-        throw runtime_error("Failed to get verify callback data index");
+        const string msg = "Failed to get verify callback data index.";
+        logSSLError(msg);
+        throw runtime_error(msg);
     }
         
     LOG4CPLUS_TRACE(logger, "Value of exDataIndex: " << exDataIndex); // NOLINT
@@ -267,8 +266,9 @@ void ClientSide::loadRefClientCertPubkey(const string &certFile,
     auto caCert = loadCertFile(caFile);
     if(!SSL_CTX_add_client_CA(ptr, caCert.get()))
     {
-        logSSLErrorStack();
-        throw runtime_error("Failed to add client CA");
+        const string msg = "Failed to add client CA.";
+        logSSLError(msg);
+        throw runtime_error(msg);
     }
 
     LOG4CPLUS_DEBUG(logger, "Expected client certificate loaded"); // NOLINT
@@ -310,8 +310,9 @@ ClientSide::X509Mem ClientSide::loadCertFile(const string &fileName)
         PEM_read_X509(f.get(), nullptr, nullptr, nullptr), &X509_free);
     if(!pubCert)
     {
-        throw runtime_error(
-            sslErrMsg("Error encountered reading pubkey. Cause: "));
+        const string msg = "Error encountered reading pubkey.";
+        logSSLError(msg);
+        throw runtime_error(msg);
     }
 
     LOG4CPLUS_DEBUG(logger, "Certificate in " << fileName << " loaded"); // NOLINT
@@ -362,6 +363,6 @@ int ClientSide::verifyCB(int preverifyOk, X509_STORE_CTX *x509Ctx)
     return (rslt == 1 ? 1 : 0);
 }
 
-int ClientSide::exDataIndex;
+thread_local int ClientSide::exDataIndex;
 
 } // namespace tlslookieloo
